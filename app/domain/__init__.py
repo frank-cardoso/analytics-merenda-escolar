@@ -1,0 +1,1 @@
+"""Regras analiticas puras."""
