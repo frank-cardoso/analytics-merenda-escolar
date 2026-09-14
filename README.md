@@ -20,10 +20,20 @@ Este servico recebe somente dados agregados da API Java e devolve uma previsao e
 
 ## Execucao local
 
+**Windows (PowerShell):**
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
+
+**Linux/macOS:**
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -e ".[dev]"
+./.venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
 
 API local:
@@ -87,7 +97,16 @@ Response:
 
 ## Verificacao
 
+**Windows (PowerShell):**
+
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -v
 .\.venv\Scripts\python.exe -m ruff check .
+```
+
+**Linux/macOS:**
+
+```bash
+./.venv/bin/python -m pytest -v
+./.venv/bin/python -m ruff check .
 ```
