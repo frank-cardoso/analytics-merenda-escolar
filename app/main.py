@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.indicadores_controller import router as indicadores_router
 from app.api.previsoes_controller import router as previsoes_router
 from app.api.tendencias_controller import router as tendencias_router
 
@@ -11,6 +12,7 @@ app = FastAPI(
 
 app.include_router(previsoes_router)
 app.include_router(tendencias_router)
+app.include_router(indicadores_router)
 
 
 @app.get("/health", tags=["health"])

@@ -97,6 +97,31 @@ Response:
 
 ## Verificacao
 
+### Indicadores logísticos
+
+`POST /api/v1/indicadores-logisticos` recebe dados já agregados do Java. Os schemas completos
+estão no Swagger (`/docs`) e em `app/domain/indicadores_logisticos.py`.
+
+Entrada: `dataReferencia`, `inicioHistorico`, `turno`, `quantidadePlanejada`,
+`consumosRegistrados`, `alunosUnicos`, `metaPercentual`, `turmas` e `itens`.
+Saída versionada (`schemaVersion=2`): `execucaoPlanejamento`, `atendimentos`,
+`topComidas`, `porTurma`, `ingredientes`, `rotacaoCardapio` e `avisos`.
+
+- Meta: comparação antes do arredondamento; denominador zero gera percentual nulo.
+- Repetições: consumos menos alunos únicos do mesmo dia/turno.
+- Ranking: execuções registradas / planejamentos, mínimo 5 registros por item, top 10,
+  desempate por tamanho da amostra e nome. Não é ranking de aceitação ou refeições completas.
+- Quantidade servida zero conta como registro; ausência de registro não comprova rejeição.
+- Sem presença elegível, adesão por turma não é calculada.
+- Sem receitas/ingredientes e séries comparáveis, não se recomenda ciclo de cardápio.
+- Nenhuma persistência ou chamada ao Gemini é feita pelo Python.
+
+Os dados chegam agregados; esta primeira versão usa Python padrão/Pydantic, sem adicionar
+Pandas apenas para calcular razões e ordenar contagens. Pandas continua como opção para
+futuros cálculos sobre séries e composições.
+
+### Comandos
+
 **Windows (PowerShell):**
 
 ```powershell
