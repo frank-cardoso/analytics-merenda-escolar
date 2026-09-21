@@ -16,7 +16,7 @@ def test_cria_previsao_de_consumo():
             "consumosAutorizados": 1,
             "tentativasBloqueadas": 3,
             "taxaConsumoPlanejado": 0.33,
-            "sobraEstimada": 299,
+            "sobraDePlanejamento": 299,
             "historico": [],
         },
     )
@@ -24,14 +24,22 @@ def test_cria_previsao_de_consumo():
     assert response.status_code == 200
     assert response.json() == {
         "demandaEstimada": 1,
-        "ajusteSugerido": -299,
-        "riscoDesperdicio": "ALTO",
+        "mediaHistorica": None,
+        "pisoRealizado": 1,
+        "origemEstimativa": "REALIZADO_SEM_HISTORICO",
+        "diferencaPrevisaoPlanejamento": -299,
+        "riscoDesperdicio": "NAO_AVALIAVEL",
+        "desperdicioMotivo": (
+            "Nao ha medicao de sobra nao distribuida nem de resto no prato. A diferenca entre "
+            "planejamento e autorizacoes e sobra de planejamento, nao desperdicio de alimento."
+        ),
         "confianca": "BAIXA",
-        "metodo": "baseline-estatistico-v1",
+        "metodo": "baseline-estatistico-v2",
         "evidencias": [
             "Foram autorizados 1 consumos de 300 refeicoes planejadas.",
-            "A sobra estimada informada pela API Java foi de 299 refeicoes.",
-            "Historico insuficiente; previsao baseada no consumo atual.",
+            "A sobra de planejamento informada pela API Java foi de 299 refeicoes; "
+            "e diferenca de planejamento, nao desperdicio medido.",
+            "Historico insuficiente; a estimativa e o proprio realizado do dia.",
             "Houve 3 tentativas bloqueadas no periodo.",
         ],
     }
