@@ -116,6 +116,16 @@ Saída versionada (`schemaVersion=2`): `execucaoPlanejamento`, `atendimentos`,
 - Sem receitas/ingredientes e séries comparáveis, não se recomenda ciclo de cardápio.
 - Nenhuma persistência ou chamada ao Gemini é feita pelo Python.
 
+### Escopos dos indicadores
+
+O dia e o turno de referência representam a fotografia operacional: planejamento, autorizações,
+bloqueios e registros por turma. A aceitação e o desperdício são calculados a partir dos
+fechamentos da merendeira dos últimos 7 ou 30 dias até a data de referência.
+
+Quando a API envia um cardápio selecionado, `fechamentosDoMes`, `fechamentosDaSemana` e as
+medições por receita ficam restritos às datas completas desse cardápio. A resposta versionada
+atual é `schemaVersion=3`. Registros da fila não são tratados como prova de ingestão.
+
 Os dados chegam agregados; esta primeira versão usa Python padrão/Pydantic, sem adicionar
 Pandas apenas para calcular razões e ordenar contagens. Pandas continua como opção para
 futuros cálculos sobre séries e composições.
