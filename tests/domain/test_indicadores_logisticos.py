@@ -2,6 +2,7 @@ from app.domain.indicadores_logisticos import (
     IndicadoresRequest,
     IngredienteRef,
     MedicaoDoDia,
+    ReceitaFechamento,
     ReceitaMedida,
     calcular_indicadores,
 )
@@ -27,6 +28,32 @@ def test_aceitacao_e_desperdicio_ficam_indisponiveis_sem_medicao():
     assert resposta.desperdicio.status == "DADOS_INSUFICIENTES"
     assert resposta.desperdicio.risco == "NAO_AVALIAVEL"
     assert any("Sem medição de sobra lançada" in aviso for aviso in resposta.avisos)
+
+
+def test_aceitacao_dos_itens_agrega_fechamentos_da_merendeira():
+    resposta = calcular_indicadores(_request(fechamentos_do_mes=[
+        ReceitaFechamento(
+            receita_id="00000000-0000-0000-0000-000000000001", nome="Arroz branco",
+            porcoes_preparadas=100, porcoes_servidas=80, sobra_nao_distribuida=20,
+            resto_no_prato=8, fechamentos=1),
+        ReceitaFechamento(
+            receita_id="00000000-0000-0000-0000-000000000001", nome="Arroz branco",
+            porcoes_preparadas=50, porcoes_servidas=40, sobra_nao_distribuida=10,
+            resto_no_prato=4, fechamentos=1),
+        ReceitaFechamento(
+            receita_id="00000000-0000-0000-0000-000000000001", nome="Arroz branco",
+            porcoes_preparadas=50, porcoes_servidas=40, sobra_nao_distribuida=10,
+            resto_no_prato=4, fechamentos=1),
+    ]))
+
+    item = resposta.aceitacao_itens[0]
+    assert item.item == "Arroz branco"
+    assert item.porcoes_preparadas == 200
+    assert item.porcoes_servidas == 160
+    assert item.porcoes_consumidas == 144
+    assert item.resto_no_prato == 16
+    assert item.percentual == 90.0
+    assert item.fechamentos == 3
 
 
 def test_aceitacao_mede_o_que_voltou_no_prato_nao_o_planejamento():

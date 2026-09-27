@@ -7,7 +7,6 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
-
 class Contrato(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
 
@@ -87,6 +86,24 @@ class ReceitaMedida(Contrato):
         return self
 
 
+class ReceitaFechamento(Contrato):
+    receita_id: str = Field(min_length=1, max_length=64)
+    nome: str = Field(min_length=1, max_length=120)
+    porcoes_preparadas: int = Field(ge=0)
+    porcoes_servidas: int = Field(ge=0)
+    sobra_nao_distribuida: int = Field(ge=0)
+    resto_no_prato: int = Field(ge=0)
+    fechamentos: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validar(self) -> Self:
+        if self.porcoes_servidas + self.sobra_nao_distribuida != self.porcoes_preparadas:
+            raise ValueError("Preparadas deve ser a soma de servidas e sobra não distribuída")
+        if self.resto_no_prato > self.porcoes_servidas:
+            raise ValueError("Resto no prato não pode superar o que foi servido")
+        return self
+
+
 class IndicadoresRequest(Contrato):
     data_referencia: date
     inicio_historico: date
@@ -99,6 +116,14 @@ class IndicadoresRequest(Contrato):
     itens: list[ContagemItem] = Field(default_factory=list)
     medicao_do_dia: MedicaoDoDia | None = None
     receitas_medidas: list[ReceitaMedida] = Field(default_factory=list)
+    fechamentos_do_mes: list[ReceitaFechamento] = Field(default_factory=list)
+    fechamentos_da_semana: list[ReceitaFechamento] = Field(default_factory=list)
+    quantidade_fechamentos_do_mes: int = Field(default=0, ge=0)
+    quantidade_fechamentos_da_semana: int = Field(default=0, ge=0)
+    datas_fechamentos_do_mes: list[date] = Field(default_factory=list)
+    receitas_selecionadas: list[str] = Field(default_factory=list)
+    datas_selecionadas: list[date] = Field(default_factory=list)
+    cobertura_fechamentos_completa: bool = False
 
     @model_validator(mode="after")
     def validar(self) -> Self:
@@ -126,6 +151,17 @@ class Atendimentos(Contrato):
 class ItemRanking(ContagemItem):
     metrica: str = "EXECUCAO_REGISTRADA"
     percentual: float
+
+
+class AceitacaoItem(Contrato):
+    receita_id: str
+    item: str
+    porcoes_preparadas: int
+    porcoes_servidas: int
+    porcoes_consumidas: int
+    resto_no_prato: int
+    percentual: float | None
+    fechamentos: int
 
 
 class TurmaIndicadores(ContagemTurma):
@@ -207,6 +243,11 @@ class IndicadoresResponse(Contrato):
     execucao_planejamento: ExecucaoPlanejamento
     atendimentos: Atendimentos
     top_comidas: list[ItemRanking]
+    aceitacao_itens: list[AceitacaoItem]
+    aceitacao_itens_semana: list[AceitacaoItem]
+    quantidade_fechamentos_do_mes: int
+    quantidade_fechamentos_da_semana: int
+    datas_fechamentos_do_mes: list[date]
     por_turma: list[TurmaIndicadores]
     aceitacao: Aceitacao
     desperdicio: Desperdicio
@@ -216,6 +257,9 @@ class IndicadoresResponse(Contrato):
 
 
 def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
+    fechamentos_mes = _filtrar_receitas(request.fechamentos_do_mes, request.receitas_selecionadas)
+    fechamentos_semana = _filtrar_receitas(request.fechamentos_da_semana, request.receitas_selecionadas)
+    receitas_medidas = _filtrar_receitas_medidas(request.receitas_medidas, request.receitas_selecionadas)
     taxa = (
         Decimal(request.consumos_registrados) * 100 / request.quantidade_planejada
         if request.quantidade_planejada else None
@@ -242,17 +286,19 @@ def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
                       "desperdício ficam indisponíveis até alguém registrar.")
     else:
         medicao = request.medicao_do_dia
-        avisos.append(f"Medição de sobra cobre {medicao.itens_medidos} de "
-                      f"{medicao.itens_do_cardapio} itens do cardápio.")
+        avisos.append(f"No dia de referência, a medição de sobra cobre {medicao.itens_medidos} de "
+                      f"{medicao.itens_do_cardapio} receitas do cardápio.")
     if request.receitas_medidas:
-        avisos.append(f"Análise de ingrediente sobre {len(request.receitas_medidas)} receitas "
-                      f"medidas na janela; o resto é medido por prato inteiro, então "
+        avisos.append(f"Análise histórica de ingredientes baseada em {len(request.receitas_medidas)} tipos "
+                      f"de receita com medição na janela; o resto é medido por prato inteiro, então "
                       f"ingredientes servidos juntos dividem o mesmo número.")
     origens = sorted({origem for item in request.itens for origem in item.origens})
     if origens:
         avisos.append("Origens do histórico: " + ", ".join(origens) + ".")
     if not ranking:
         avisos.append("Sem itens com amostra suficiente para o ranking neste período.")
+    aceitacao_itens = _calcular_aceitacao_itens(fechamentos_mes, min_fechamentos=3)
+    aceitacao_itens_semana = _calcular_aceitacao_itens(fechamentos_semana, min_fechamentos=1)
     return IndicadoresResponse(
         data_referencia=request.data_referencia,
         inicio_historico=request.inicio_historico,
@@ -272,17 +318,108 @@ def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
             **item.model_dump(),
             percentual=_arredondar(Decimal(item.execucoes_registradas) * 100 / item.planejamentos),
         ) for item in ranking],
+        aceitacao_itens=aceitacao_itens,
+        aceitacao_itens_semana=aceitacao_itens_semana,
+        quantidade_fechamentos_do_mes=request.quantidade_fechamentos_do_mes,
+        quantidade_fechamentos_da_semana=request.quantidade_fechamentos_da_semana,
+        datas_fechamentos_do_mes=request.datas_fechamentos_do_mes,
         por_turma=[TurmaIndicadores(
             **turma.model_dump(), repeticoes=turma.consumos_registrados - turma.alunos_unicos,
         ) for turma in request.turmas],
-        aceitacao=_calcular_aceitacao(request.medicao_do_dia),
-        desperdicio=_calcular_desperdicio(request.medicao_do_dia),
-        ingredientes=_analisar_ingredientes(request.receitas_medidas),
+        aceitacao=_calcular_aceitacao(_medicao_para_periodo(request, fechamentos_mes)),
+        desperdicio=_calcular_desperdicio(_medicao_para_periodo(request, fechamentos_mes)),
+        ingredientes=_analisar_ingredientes(receitas_medidas),
         rotacao_cardapio=AnaliseIndisponivel(
             motivo="Faltam séries de oferta e adesão comparáveis para recomendar um ciclo."
         ),
         avisos=avisos,
     )
+
+
+def _calcular_aceitacao_itens(
+    fechamentos: list[ReceitaFechamento], min_fechamentos: int
+) -> list[AceitacaoItem]:
+    """Classifica itens somente com amostra mínima de fechamentos.
+
+    Um item com 100% em um único fechamento é uma observação frágil e não deve
+    superar itens medidos repetidamente no período.
+    """
+    agregados: dict[str, dict] = {}
+    for fechamento in fechamentos:
+        agregado = agregados.setdefault(fechamento.receita_id, {
+            "receita_id": fechamento.receita_id,
+            "item": fechamento.nome,
+            "porcoes_preparadas": 0,
+            "porcoes_servidas": 0,
+            "sobra_nao_distribuida": 0,
+            "resto_no_prato": 0,
+            "fechamentos": 0,
+        })
+        agregado["porcoes_preparadas"] += fechamento.porcoes_preparadas
+        agregado["porcoes_servidas"] += fechamento.porcoes_servidas
+        agregado["sobra_nao_distribuida"] += fechamento.sobra_nao_distribuida
+        agregado["resto_no_prato"] += fechamento.resto_no_prato
+        agregado["fechamentos"] += fechamento.fechamentos
+
+    itens = []
+    for agregado in agregados.values():
+        if agregado["fechamentos"] < min_fechamentos:
+            continue
+        servidas = agregado["porcoes_servidas"]
+        resto = agregado["resto_no_prato"]
+        consumidas = max(0, servidas - resto)
+        percentual = _arredondar(Decimal(consumidas) * 100 / servidas) if servidas else None
+        itens.append(AceitacaoItem(
+            receita_id=agregado["receita_id"],
+            item=agregado["item"],
+            porcoes_preparadas=agregado["porcoes_preparadas"],
+            porcoes_servidas=servidas,
+            porcoes_consumidas=consumidas,
+            resto_no_prato=resto,
+            percentual=percentual,
+            fechamentos=agregado["fechamentos"],
+        ))
+    return sorted(itens, key=lambda item: (item.percentual is None,
+                                            -(item.percentual or 0), item.item))
+
+
+def _medicao_para_periodo(
+    request: IndicadoresRequest, fechamentos: list[ReceitaFechamento]
+) -> MedicaoDoDia | None:
+    """Usa os fechamentos mensais como base dos cards e da análise de IA.
+
+    A medição do dia de referência pode estar vazia mesmo quando existem fechamentos
+    suficientes na janela mensal. Nesse caso, usar somente o dia faria a IA ignorar
+    justamente a amostra que liberou a análise.
+    """
+    if fechamentos:
+        return MedicaoDoDia(
+            porcoes_preparadas=sum(item.porcoes_preparadas for item in fechamentos),
+            porcoes_servidas=sum(item.porcoes_servidas for item in fechamentos),
+            sobra_nao_distribuida=sum(
+                item.sobra_nao_distribuida for item in fechamentos
+            ),
+            resto_no_prato=sum(item.resto_no_prato for item in fechamentos),
+            itens_medidos=1 if request.cobertura_fechamentos_completa else 0,
+            itens_do_cardapio=1,
+        )
+    return request.medicao_do_dia
+
+
+def _filtrar_receitas(
+    fechamentos: list[ReceitaFechamento], selecionadas: list[str]
+) -> list[ReceitaFechamento]:
+    if not selecionadas:
+        return fechamentos
+    return [item for item in fechamentos if item.receita_id in selecionadas]
+
+
+def _filtrar_receitas_medidas(
+    receitas: list[ReceitaMedida], selecionadas: list[str]
+) -> list[ReceitaMedida]:
+    if not selecionadas:
+        return receitas
+    return [item for item in receitas if item.receita_id in selecionadas]
 
 
 def _base_insuficiente(medicao: MedicaoDoDia, denominador: int) -> str | None:
@@ -304,7 +441,7 @@ def _calcular_aceitacao(medicao: MedicaoDoDia | None) -> Aceitacao:
     if medicao is None or medicao.porcoes_servidas == 0:
         return Aceitacao(
             status="DADOS_INSUFICIENTES", nivel="NAO_AVALIAVEL",
-            motivo="Sem medição de resto no prato para este dia e turno. "
+            motivo="Sem medição de resto no prato no período analisado. "
                    "Autorização na fila não comprova ingestão.",
         )
 
