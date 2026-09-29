@@ -126,6 +126,13 @@ Quando a API envia um cardápio selecionado, `fechamentosDoMes`, `fechamentosDaS
 medições por receita ficam restritos às datas completas desse cardápio. A resposta versionada
 atual é `schemaVersion=3`. Registros da fila não são tratados como prova de ingestão.
 
+## Pendências e próximos passos
+
+- Incorporar presença elegível aos cálculos de adesão por turma quando a API disponibilizar essa base.
+- Avaliar métricas históricas de tendência e comparação entre cardápios com dados reais suficientes.
+- Revisar a análise de ingredientes para reduzir ambiguidades quando vários ingredientes aparecem no mesmo prato.
+- Manter a distinção entre dados sintéticos, registros da fila e medições de sobra nos avisos da resposta.
+
 Os dados chegam agregados; esta primeira versão usa Python padrão/Pydantic, sem adicionar
 Pandas apenas para calcular razões e ordenar contagens. Pandas continua como opção para
 futuros cálculos sobre séries e composições.
