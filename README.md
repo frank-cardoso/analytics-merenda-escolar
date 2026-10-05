@@ -97,6 +97,48 @@ Response:
 
 ## Verificacao
 
+### Indicadores logísticos
+
+`POST /api/v1/indicadores-logisticos` recebe dados já agregados do Java. Os schemas completos
+estão no Swagger (`/docs`) e em `app/domain/indicadores_logisticos.py`.
+
+Entrada: `dataReferencia`, `inicioHistorico`, `turno`, `quantidadePlanejada`,
+`consumosRegistrados`, `alunosUnicos`, `metaPercentual`, `turmas` e `itens`.
+Saída versionada (`schemaVersion=2`): `execucaoPlanejamento`, `atendimentos`,
+`topComidas`, `porTurma`, `ingredientes`, `rotacaoCardapio` e `avisos`.
+
+- Meta: comparação antes do arredondamento; denominador zero gera percentual nulo.
+- Repetições: consumos menos alunos únicos do mesmo dia/turno.
+- Ranking: execuções registradas / planejamentos, mínimo 5 registros por item, top 10,
+  desempate por tamanho da amostra e nome. Não é ranking de aceitação ou refeições completas.
+- Quantidade servida zero conta como registro; ausência de registro não comprova rejeição.
+- Sem presença elegível, adesão por turma não é calculada.
+- Sem receitas/ingredientes e séries comparáveis, não se recomenda ciclo de cardápio.
+- Nenhuma persistência ou chamada ao Gemini é feita pelo Python.
+
+### Escopos dos indicadores
+
+O dia e o turno de referência representam a fotografia operacional: planejamento, autorizações,
+bloqueios e registros por turma. A aceitação e o desperdício são calculados a partir dos
+fechamentos da merendeira dos últimos 7 ou 30 dias até a data de referência.
+
+Quando a API envia um cardápio selecionado, `fechamentosDoMes`, `fechamentosDaSemana` e as
+medições por receita ficam restritos às datas completas desse cardápio. A resposta versionada
+atual é `schemaVersion=3`. Registros da fila não são tratados como prova de ingestão.
+
+## Pendências e próximos passos
+
+- Incorporar presença elegível aos cálculos de adesão por turma quando a API disponibilizar essa base.
+- Avaliar métricas históricas de tendência e comparação entre cardápios com dados reais suficientes.
+- Revisar a análise de ingredientes para reduzir ambiguidades quando vários ingredientes aparecem no mesmo prato.
+- Manter a distinção entre dados sintéticos, registros da fila e medições de sobra nos avisos da resposta.
+
+Os dados chegam agregados; esta primeira versão usa Python padrão/Pydantic, sem adicionar
+Pandas apenas para calcular razões e ordenar contagens. Pandas continua como opção para
+futuros cálculos sobre séries e composições.
+
+### Comandos
+
 **Windows (PowerShell):**
 
 ```powershell

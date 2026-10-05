@@ -1,9 +1,18 @@
+"""Previsao de demanda. Sem medicao de sobra e resto, desperdicio nao e avaliavel."""
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-RiscoDesperdicio = Literal["BAIXO", "MEDIO", "ALTO"]
 ConfiancaPrevisao = Literal["BAIXA", "MEDIA", "ALTA"]
+OrigemEstimativa = Literal["MEDIA_HISTORICA", "PISO_REALIZADO", "REALIZADO_SEM_HISTORICO"]
+
+METODO = "baseline-estatistico-v2"
+
+MOTIVO_DESPERDICIO = (
+    "Nao ha medicao de sobra nao distribuida nem de resto no prato. A diferenca entre "
+    "planejamento e autorizacoes e sobra de planejamento, nao desperdicio de alimento."
+)
 
 
 class HistoricoConsumo(BaseModel):
@@ -23,7 +32,7 @@ class PrevisaoConsumoRequest(BaseModel):
     consumos_autorizados: int = Field(alias="consumosAutorizados", ge=0)
     tentativas_bloqueadas: int = Field(alias="tentativasBloqueadas", ge=0)
     taxa_consumo_planejado: float = Field(alias="taxaConsumoPlanejado", ge=0)
-    sobra_estimada: int = Field(alias="sobraEstimada", ge=0)
+    sobra_de_planejamento: int = Field(alias="sobraDePlanejamento", ge=0)
     historico: list[HistoricoConsumo] = Field(default_factory=list)
 
 
@@ -31,48 +40,52 @@ class PrevisaoConsumoResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     demanda_estimada: int = Field(alias="demandaEstimada")
-    ajuste_sugerido: int = Field(alias="ajusteSugerido")
-    risco_desperdicio: RiscoDesperdicio = Field(alias="riscoDesperdicio")
+    media_historica: int | None = Field(alias="mediaHistorica")
+    piso_realizado: int = Field(alias="pisoRealizado")
+    origem_estimativa: OrigemEstimativa = Field(alias="origemEstimativa")
+    diferenca_previsao_planejamento: int = Field(alias="diferencaPrevisaoPlanejamento")
+    risco_desperdicio: Literal["NAO_AVALIAVEL"] = Field(alias="riscoDesperdicio")
+    desperdicio_motivo: str = Field(alias="desperdicioMotivo")
     confianca: ConfiancaPrevisao
     metodo: str
     evidencias: list[str]
 
 
 def calcular_previsao(request: PrevisaoConsumoRequest) -> PrevisaoConsumoResponse:
-    demanda_estimada = _estimar_demanda(request)
-    ajuste_sugerido = demanda_estimada - request.quantidade_planejada
+    media_historica = _media_historica(request)
+    piso_realizado = request.consumos_autorizados
+    demanda_estimada = (
+        piso_realizado if media_historica is None else max(media_historica, piso_realizado)
+    )
 
     return PrevisaoConsumoResponse(
         demanda_estimada=demanda_estimada,
-        ajuste_sugerido=ajuste_sugerido,
-        risco_desperdicio=_classificar_risco(request, demanda_estimada),
+        media_historica=media_historica,
+        piso_realizado=piso_realizado,
+        origem_estimativa=_origem(media_historica, piso_realizado),
+        diferenca_previsao_planejamento=demanda_estimada - request.quantidade_planejada,
+        risco_desperdicio="NAO_AVALIAVEL",
+        desperdicio_motivo=MOTIVO_DESPERDICIO,
         confianca=_classificar_confianca(request),
-        metodo="baseline-estatistico-v1",
-        evidencias=_montar_evidencias(request),
+        metodo=METODO,
+        evidencias=_montar_evidencias(request, media_historica, piso_realizado),
     )
 
 
-def _estimar_demanda(request: PrevisaoConsumoRequest) -> int:
+def _media_historica(request: PrevisaoConsumoRequest) -> int | None:
     if not request.historico:
-        return request.consumos_autorizados
+        return None
 
     total = sum(item.consumos_autorizados for item in request.historico)
     return round(total / len(request.historico))
 
 
-def _classificar_risco(
-    request: PrevisaoConsumoRequest,
-    demanda_estimada: int,
-) -> RiscoDesperdicio:
-    if request.quantidade_planejada == 0:
-        return "BAIXO"
-
-    proporcao_demanda = demanda_estimada / request.quantidade_planejada
-    if proporcao_demanda < 0.6:
-        return "ALTO"
-    if proporcao_demanda < 0.85:
-        return "MEDIO"
-    return "BAIXO"
+# A media historica cobre dias inteiros, mas o dia de hoje ja tem catraca rodada: prever abaixo
+# do que ja aconteceu e impossivel. O realizado entra como piso, nunca como teto.
+def _origem(media_historica: int | None, piso_realizado: int) -> OrigemEstimativa:
+    if media_historica is None:
+        return "REALIZADO_SEM_HISTORICO"
+    return "MEDIA_HISTORICA" if media_historica >= piso_realizado else "PISO_REALIZADO"
 
 
 def _classificar_confianca(request: PrevisaoConsumoRequest) -> ConfiancaPrevisao:
@@ -84,19 +97,30 @@ def _classificar_confianca(request: PrevisaoConsumoRequest) -> ConfiancaPrevisao
     return "BAIXA"
 
 
-def _montar_evidencias(request: PrevisaoConsumoRequest) -> list[str]:
+def _montar_evidencias(
+    request: PrevisaoConsumoRequest,
+    media_historica: int | None,
+    piso_realizado: int,
+) -> list[str]:
     evidencias = [
         f"Foram autorizados {request.consumos_autorizados} consumos de "
         f"{request.quantidade_planejada} refeicoes planejadas.",
-        f"A sobra estimada informada pela API Java foi de {request.sobra_estimada} refeicoes.",
+        f"A sobra de planejamento informada pela API Java foi de {request.sobra_de_planejamento} "
+        f"refeicoes; e diferenca de planejamento, nao desperdicio medido.",
     ]
 
-    if request.historico:
-        evidencias.append(
-            f"A previsao usou {len(request.historico)} registros historicos agregados."
-        )
+    if media_historica is None:
+        evidencias.append("Historico insuficiente; a estimativa e o proprio realizado do dia.")
     else:
-        evidencias.append("Historico insuficiente; previsao baseada no consumo atual.")
+        evidencias.append(
+            f"A media de {len(request.historico)} registros historicos "
+            f"foi {media_historica} consumos."
+        )
+        if media_historica < piso_realizado:
+            evidencias.append(
+                f"A media historica ({media_historica}) ficou abaixo do realizado do dia "
+                f"({piso_realizado}); a estimativa usa o realizado como piso."
+            )
 
     if request.tentativas_bloqueadas:
         evidencias.append(
