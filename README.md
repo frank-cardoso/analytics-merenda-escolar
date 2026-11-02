@@ -104,7 +104,7 @@ estão no Swagger (`/docs`) e em `app/domain/indicadores_logisticos.py`.
 
 Entrada: `dataReferencia`, `inicioHistorico`, `turno`, `quantidadePlanejada`,
 `consumosRegistrados`, `alunosUnicos`, `metaPercentual`, `turmas` e `itens`.
-Saída versionada (`schemaVersion=2`): `execucaoPlanejamento`, `atendimentos`,
+Saída versionada (`schemaVersion=4`): `execucaoPlanejamento`, `atendimentos`,
 `topComidas`, `porTurma`, `ingredientes`, `rotacaoCardapio` e `avisos`.
 
 - Meta: comparação antes do arredondamento; denominador zero gera percentual nulo.
@@ -112,7 +112,12 @@ Saída versionada (`schemaVersion=2`): `execucaoPlanejamento`, `atendimentos`,
 - Ranking: execuções registradas / planejamentos, mínimo 5 registros por item, top 10,
   desempate por tamanho da amostra e nome. Não é ranking de aceitação ou refeições completas.
 - Quantidade servida zero conta como registro; ausência de registro não comprova rejeição.
-- Sem presença elegível, adesão por turma não é calculada.
+- `turmas` recebe `turmaId` (nulo no balde "Sem turma") e `turma` (texto obrigatório); a resposta
+  repete `turmaId` em cada item de `porTurma`. O Python só repassa o que a API carimbou: não
+  conhece cadastro de turma nem enturmação.
+- Sem presença elegível, adesão por turma não é calculada: segue `NAO_AVALIAVEL`, mesmo com a
+  turma modelada na API.
+- `turma` nula é rejeitada com HTTP 422.
 - Sem receitas/ingredientes e séries comparáveis, não se recomenda ciclo de cardápio.
 - Nenhuma persistência ou chamada ao Gemini é feita pelo Python.
 
@@ -124,7 +129,7 @@ fechamentos da merendeira dos últimos 7 ou 30 dias até a data de referência.
 
 Quando a API envia um cardápio selecionado, `fechamentosDoMes`, `fechamentosDaSemana` e as
 medições por receita ficam restritos às datas completas desse cardápio. A resposta versionada
-atual é `schemaVersion=3`. Registros da fila não são tratados como prova de ingestão.
+atual é `schemaVersion=4`; o Java ainda lê relatórios persistidos em "2" e "3". Registros da fila não são tratados como prova de ingestão.
 
 ## Pendências e próximos passos
 

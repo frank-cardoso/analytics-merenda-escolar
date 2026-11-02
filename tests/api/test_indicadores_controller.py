@@ -10,7 +10,8 @@ def payload():
         "dataReferencia": "2026-09-17", "inicioHistorico": "2026-08-19", "turno": "MANHA",
         "quantidadePlanejada": 100, "consumosRegistrados": 80, "alunosUnicos": 70,
         "metaPercentual": 80,
-        "turmas": [{"turma": "A", "consumosRegistrados": 80, "alunosUnicos": 70}],
+        "turmas": [{"turmaId": "00000000-0000-0000-0000-0000000000a1", "turma": "A",
+                    "consumosRegistrados": 80, "alunosUnicos": 70}],
         "itens": [
             {"item": "Arroz", "planejamentos": 10, "execucoesRegistradas": 8,
              "escolas": 2, "origens": ["FAKE"]},
@@ -29,6 +30,7 @@ def test_meta_e_repeticoes_nao_confundem_refeicoes_com_alunos():
     assert result["execucaoPlanejamento"]["percentual"] == 80
     assert result["execucaoPlanejamento"]["statusMeta"] == "ATINGIDA"
     assert result["atendimentos"]["repeticoes"] == 10
+    assert result["porTurma"][0]["turmaId"] == "00000000-0000-0000-0000-0000000000a1"
     assert result["porTurma"][0]["percentual"] is None
     assert result["porTurma"][0]["statusMeta"] == "NAO_AVALIAVEL"
 

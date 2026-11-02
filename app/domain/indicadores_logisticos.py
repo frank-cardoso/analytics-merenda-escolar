@@ -12,6 +12,8 @@ class Contrato(BaseModel):
 
 
 class ContagemTurma(Contrato):
+    # Nulo é o balde "Sem turma": consumo cujo aluno não tinha enturmação vigente na data.
+    turma_id: str | None = None
     turma: str = Field(min_length=1, max_length=80)
     consumos_registrados: int = Field(ge=0)
     alunos_unicos: int = Field(ge=0)
@@ -168,7 +170,7 @@ class TurmaIndicadores(ContagemTurma):
     repeticoes: int
     percentual: float | None = None
     status_meta: str = "NAO_AVALIAVEL"
-    motivo: str = "Sem registro de presença elegível; turma atual do cadastro do aluno."
+    motivo: str = "Sem registro de presença elegível; turma vigente na data do consumo."
 
 
 # Faixas de convencao do prototipo, nao medidas em producao. Ficam nomeadas para que quem
@@ -234,7 +236,7 @@ class AnaliseIndisponivel(Contrato):
 
 
 class IndicadoresResponse(Contrato):
-    schema_version: str = "3"
+    schema_version: str = "4"
     calculo_versao: str = "indicadores-v1"
     status: str = "DISPONIVEL"
     data_referencia: date
@@ -279,7 +281,9 @@ def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
         "O ranking pode agregar várias escolas e origens; não representa apenas a fila local.",
         "QR Code representa autorização registrada, não comprovação de ingestão ou desperdício; "
         "aceitação e desperdício vêm da medição de sobra, não da fila.",
-        "Adesão por turma não avaliável sem presença; bloqueios não representam rejeição.",
+        "Adesão por turma não avaliável sem presença elegível; bloqueios não representam rejeição. "
+        "A turma é a vigente na data de cada consumo; sem enturmação vigente, "
+        "entra em \"Sem turma\".",
     ]
     if request.medicao_do_dia is None:
         avisos.append("Sem medição de sobra lançada para este dia e turno: aceitação e "

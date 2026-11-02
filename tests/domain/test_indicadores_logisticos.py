@@ -1,4 +1,5 @@
 from app.domain.indicadores_logisticos import (
+    ContagemTurma,
     IndicadoresRequest,
     IngredienteRef,
     MedicaoDoDia,
@@ -163,3 +164,40 @@ def test_cobertura_total_no_piso_exato_classifica():
     assert resposta.aceitacao.status == "DISPONIVEL"
     assert resposta.aceitacao.nivel == "ALTA"
     assert resposta.desperdicio.status == "DISPONIVEL"
+
+
+def test_contagem_turma_aceita_turma_id_nulo():
+    contagem = ContagemTurma.model_validate(
+        {"turmaId": None, "turma": "Sem turma", "consumosRegistrados": 3, "alunosUnicos": 2})
+
+    assert contagem.turma_id is None
+    assert contagem.turma == "Sem turma"
+
+
+def test_contagem_turma_propaga_turma_id_na_resposta():
+    turma_id = "00000000-0000-0000-0000-0000000000a1"
+    resposta = calcular_indicadores(_request(turmas=[
+        {"turmaId": turma_id, "turma": "8A", "consumosRegistrados": 5, "alunosUnicos": 4},
+        {"turmaId": None, "turma": "Sem turma", "consumosRegistrados": 2, "alunosUnicos": 2},
+    ]))
+
+    assert resposta.por_turma[0].turma_id == turma_id
+    assert resposta.por_turma[0].repeticoes == 1
+    assert resposta.por_turma[1].turma_id is None
+    assert resposta.model_dump(by_alias=True)["porTurma"][0]["turmaId"] == turma_id
+    assert all(t.status_meta == "NAO_AVALIAVEL" and t.percentual is None
+               for t in resposta.por_turma)
+
+
+def test_schema_version_e_4():
+    assert calcular_indicadores(_request()).schema_version == "4"
+
+
+def test_motivo_por_turma_nao_cita_turma_atual_do_cadastro():
+    resposta = calcular_indicadores(_request(turmas=[
+        {"turmaId": None, "turma": "Sem turma", "consumosRegistrados": 1, "alunosUnicos": 1}]))
+
+    motivo = resposta.por_turma[0].motivo
+    assert "atual do cadastro" not in motivo
+    assert "vigente na data do consumo" in motivo
+    assert not any("atual do cadastro" in aviso for aviso in resposta.avisos)
