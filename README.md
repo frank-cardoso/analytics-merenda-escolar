@@ -45,7 +45,7 @@ chamadas ficam nos adapters de `api-merenda-escolar/src/main/java/br/com/frankca
 | `analytics/infrastructure/python/PythonTendenciaItemAdapter` | `POST /api/v1/tendencias-item` | `RelatorioIAWorker` |
 | `analytics/infrastructure/python/PythonPrevisaoConsumoAdapter` | `POST /api/v1/previsoes-consumo` | `RelatorioIAWorker` |
 | `biometria/infrastructure/python/PythonReconhecimentoFacialAdapter` | `POST /api/v1/reconhecimento-facial/embeddings` | `AlunoService` (cadastro do rosto) |
-| `biometria/infrastructure/python/PythonReconhecimentoFacialAdapter` | `POST /api/v1/reconhecimento-facial/verificacoes` | `ValidacaoConsumoService` (fila em modo facial) |
+| `biometria/infrastructure/python/PythonReconhecimentoFacialAdapter` | `POST /api/v1/reconhecimento-facial/identificacoes` | `IdentificacaoFacialService` (fila em modo facial e recusa de rosto duplicado no cadastro) |
 
 O serviço é stateless: não tem banco, o código não grava nada em disco nem lê variável de
 ambiente. Tudo o que um cálculo precisa vem no corpo do pedido e a resposta sai no mesmo request.
@@ -67,7 +67,7 @@ e a fila em modo facial dependem dele.
 - Não chama LLM. Nenhuma chamada ao Gemini ou a outro modelo de linguagem sai daqui.
 - Não conhece cadastro de turma, enturmação, ingrediente nem aluno: só repassa e calcula sobre o
   que a API carimbou no pedido.
-- No reconhecimento facial, recebe a foto e devolve o embedding ou o resultado da comparação. A foto
+- No reconhecimento facial, recebe a foto (e, na identificação, os embeddings dos candidatos) e devolve o embedding ou a decisão. A foto
   e o embedding não ficam guardados aqui; quem guarda o embedding do aluno é a API.
 
 ## Stack
@@ -85,8 +85,9 @@ quando houver histórico suficiente (séries e composições).
 ## Pré-requisitos
 
 - Python 3.12 ou superior, com o módulo `venv`.
-- Acesso à internet na primeira chamada de reconhecimento facial, para baixar os pesos do modelo
-  (ver "Reconhecimento facial").
+- Acesso à internet na primeira chamada de reconhecimento facial, para baixar os pesos do modelo e
+  os classificadores do detector (ver "Reconhecimento facial"). Antes de uma demonstração em outra
+  máquina, rode o serviço uma vez com internet.
 
 ## Instalação
 
@@ -160,6 +161,8 @@ analytics-merenda-escolar/
 │       ├── previsao_consumo.py
 │       ├── reconhecimento_facial.py
 │       └── tendencia_item.py
+├── scripts/
+│   └── gerar_rostos_demo.py        # semente de rostos de demonstração (LFW)
 ├── tests/
 │   ├── api/                        # endpoints via TestClient
 │   └── domain/                     # regras de cálculo, sem HTTP
@@ -181,7 +184,7 @@ O JSON trafega em camelCase (aliases do Pydantic) e o código Python usa snake_c
 | `POST` | `/api/v1/tendencias-item` | Classifica a série de taxas de execução de cada item em `QUEDA`, `ESTAVEL` ou `ALTA`. |
 | `POST` | `/api/v1/previsoes-consumo` | Estima a demanda do turno a partir do realizado do dia e do histórico. |
 | `POST` | `/api/v1/reconhecimento-facial/embeddings` | Gera o embedding da foto de referência do aluno (cadastro do rosto). |
-| `POST` | `/api/v1/reconhecimento-facial/verificacoes` | Compara a foto do momento com o embedding já cadastrado do aluno (1:1). |
+| `POST` | `/api/v1/reconhecimento-facial/identificacoes` | Identifica quem é a pessoa da foto entre os candidatos recebidos (1:N). |
 
 ### Indicadores logísticos
 
@@ -320,19 +323,33 @@ com detecção obrigatória (`enforce_detection=True`).
 - **`POST /api/v1/reconhecimento-facial/embeddings`**: recebe `fotoBase64` (e `modelo`, opcional) e
   devolve `embedding` e `modelo`. A foto precisa ter exatamente um rosto. A API guarda o embedding
   no cadastro do aluno.
-- **`POST /api/v1/reconhecimento-facial/verificacoes`**: recebe `fotoBase64`, `embeddingCadastrado`
-  (e `modelo`, opcional) e devolve `confere`, `distancia` (4 casas), `limiar` e `modelo`.
+- **`POST /api/v1/reconhecimento-facial/identificacoes`**: recebe `fotoBase64`, `candidatos` (lista
+  de `{id, embedding}`, ao menos um) e `modelo` (opcional). Devolve `decisao` (`RECONHECIDO`,
+  `NAO_RECONHECIDO` ou `AMBIGUO`), `melhorCandidatoId`, `distancia` e `distanciaSegundo` (4 casas),
+  `limiar`, `margemMinima`, `candidatosIgnorados` e `modelo`.
 
 `fotoBase64` é a imagem em base64; o front manda o data URL do canvas
 (`data:image/jpeg;base64,...`) e a API repassa sem alterar.
 
 Pontos que importam:
 
-- **A verificação é 1:1.** A API já sabe quem está tentando consumir (pelo código do aluno
-  informado na fila) e manda o embedding daquele aluno. Não há busca entre todos os alunos.
+- **A identificação é 1:N.** A API manda os embeddings de todos os alunos ativos com rosto
+  cadastrado e o serviço compara a foto com cada um, com distância cosseno.
+- **Decisão.** `RECONHECIDO` só quando a menor distância fica abaixo do limiar do modelo
+  (`find_threshold("Facenet", "cosine")` = 0.4) **e** o segundo colocado está pelo menos
+  `MARGEM_MINIMA = 0.08` mais longe. Perto demais: `AMBIGUO`. Acima do limiar: `NAO_RECONHECIDO`,
+  também quando não sobra candidato comparável.
+- **Maior rosto.** Se a foto tem mais de um rosto, vale o de maior área (quem está na frente da
+  câmera). O cadastro (`/embeddings`) continua exigindo exatamente um.
+- **Dimensão diferente.** Candidato cujo embedding tem outra dimensão que o da foto (cadastrado com
+  outro modelo) não é comparável: é ignorado e contado em `candidatosIgnorados`.
+- **Calibração.** Com cinco adultos do LFW cadastrados e uma imagem de teste diferente para cada
+  um: distância própria de 0.23 a 0.30, menor margem para o impostor mais próximo 0.4186 e rosto
+  desconhecido a 0.6050 do mais próximo. A margem de 0.08 ficou como está. Tabela e ressalvas em
+  `DECISOES-TECNICAS.md` da API, seção 8. Não vale para crianças.
 - **Nada é guardado.** O serviço nunca grava foto nem embedding, nem em disco nem em memória depois
   do request.
-- **Erros de detecção viram HTTP 422.** Sem rosto detectável, nos dois endpoints; mais de um rosto,
+- **Erros de detecção viram HTTP 422.** Sem rosto detectável, nos dois endpoints (na identificação, só a foto; candidatos sem `id` ou sem embedding são erro de contrato, também 422); mais de um rosto,
   só no cadastro (mensagem "N rostos detectados na foto; cadastro exige exatamente um."). A API
   distingue os dois casos pelo texto: se a mensagem não contém "rostos detectados", ela trata como
   rosto não detectado. Não mude esse texto sem mudar `PythonReconhecimentoFacialAdapter`.
@@ -340,6 +357,19 @@ Pontos que importam:
   (cerca de 90 MB, `facenet_weights.onnx`) para `~/.deepface/weights` (o DeepFace usa
   `DEEPFACE_HOME` no lugar de `~` quando definido). Em toda subida do processo, a primeira chamada
   ainda carrega o modelo na memória; com `--reload`, cada recarga reinicia o processo.
+- **O detector também baixa arquivos.** No primeiro uso o `opencv` baixa
+  `haarcascade_frontalface_default.xml` e `haarcascade_eye.xml` de github.com para
+  `~/.deepface/weights/`. Sem rede nessa primeira vez, a chamada falha.
+
+#### Semente de rostos de demonstração
+
+`scripts/gerar_rostos_demo.py --lfw-dir <pasta do LFW>` gera, a partir de adultos do dataset público
+LFW (baixado de https://ndownloader.figshare.com/files/5976018), o `rostos-demo.json` da API
+(`ALU-9001` a `ALU-9005`, só com embeddings) e as imagens de teste em
+`api-merenda-escolar/demo/rostos-teste/`. Só entram identidades cuja imagem de teste, diferente da
+de cadastro, é reconhecida com distância própria até 0.30; a semente do sorteio é 2026. Os nomes
+dos alunos são fictícios. O script usa as mesmas funções do serviço, então os números saem do
+mesmo modelo e do mesmo detector. Os testes automatizados nunca usam essas imagens.
 
 ## Testes e lint
 
@@ -362,7 +392,7 @@ então rode da raiz do repositório:
 
 Para um arquivo só: `./.venv/bin/python -m pytest tests/domain/test_reconhecimento_facial.py -q`.
 
-Os testes de reconhecimento facial substituem `DeepFace.verify` e `DeepFace.represent` por mocks:
+Os testes de reconhecimento facial substituem `DeepFace.represent` por mock e usam vetores inventados, sem imagem nem embedding de pessoa real:
 não precisam de câmera, de foto real nem dos pesos do modelo, e não acessam a rede. A suíte inteira
 roda em cerca de um segundo.
 
@@ -378,9 +408,9 @@ roda em cerca de um segundo.
   máximo 10s (`merenda.reconhecimento.timeout`), e a primeira chamada da máquina baixa cerca de
   90 MB de pesos. Depois que `~/.deepface/weights/facenet_weights.onnx` existe, não há novo
   download.
-- **HTTP 422 no reconhecimento facial.** É falta de dado, não "rosto não confere": a foto não tem
-  rosto detectável pelo `opencv` ou, no cadastro, tem mais de um rosto. "Não confere" é HTTP 200
-  com `confere: false`.
+- **HTTP 422 no reconhecimento facial.** É falta de dado, não "não reconhecido": a foto não tem
+  rosto detectável pelo `opencv` ou, no cadastro, tem mais de um rosto. "Não reconhecido" e
+  "ambíguo" são HTTP 200, na `decisao`.
 - **Dashboard com indicadores indisponíveis.** A API registra no log
   `Indicadores indisponíveis para <data> / <turno>: <exceção>` e devolve os indicadores com
   `status="INDISPONIVEL"`. Causas
@@ -398,4 +428,4 @@ roda em cerca de um segundo.
 - Avaliar métricas históricas de tendência e comparação entre cardápios com dados reais suficientes.
 - Revisar a análise de ingredientes para reduzir ambiguidades quando vários ingredientes aparecem no mesmo prato.
 - Manter a distinção entre dados sintéticos, registros da fila e medições de sobra nos avisos da resposta.
-- Identificação facial 1:N (busca entre todos os alunos cadastrados) e rostos de demonstração, em desenho.
+- Reconhecimento facial para produção: prova de vida, recadastro periódico, piloto com crianças para calibrar limiar e margem, busca restrita à escola e LGPD (ver `DECISOES-TECNICAS.md` da API, seção 8).
