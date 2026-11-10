@@ -5,6 +5,7 @@ from app.domain.indicadores_logisticos import (
     MedicaoDoDia,
     ReceitaFechamento,
     ReceitaMedida,
+    AtendimentoDia,
     calcular_indicadores,
 )
 
@@ -13,7 +14,7 @@ def _request(**alteracoes) -> IndicadoresRequest:
     base = {
         "data_referencia": "2026-09-21",
         "inicio_historico": "2026-08-23",
-        "turno": "MANHA",
+        "refeicao": {"id": "5e1a0000-0000-4000-8000-000000000002", "nome": "Lanche da manhã"},
         "quantidade_planejada": 300,
         "consumos_registrados": 91,
         "alunos_unicos": 91,
@@ -95,7 +96,7 @@ def test_compara_pratos_com_o_ingrediente_contra_pratos_sem_ele():
     resposta = calcular_indicadores(_request(receitas_medidas=[
         _receita("Chuchu", ["chuchu"], 1000, 300, 60),
         _receita("Sopa de legumes", ["chuchu", "batata"], 1000, 290, 60),
-        _receita("Pure de batata", ["batata"], 2000, 100, 120),
+        _receita("Purê de batata", ["batata"], 2000, 100, 120),
         _receita("Arroz branco", ["arroz"], 4000, 200, 200),
     ]))
 
@@ -189,8 +190,25 @@ def test_contagem_turma_propaga_turma_id_na_resposta():
                for t in resposta.por_turma)
 
 
-def test_schema_version_e_4():
-    assert calcular_indicadores(_request()).schema_version == "4"
+def test_schema_version_e_6():
+    assert calcular_indicadores(_request()).schema_version == "6"
+
+
+def test_indicadores_ecoam_a_refeicao_no_schema_6():
+    resposta = calcular_indicadores(_request(
+        refeicao={"id": "5e1a0000-0000-4000-8000-000000000003", "nome": "Almoço"}))
+
+    assert resposta.schema_version == "6"
+    assert resposta.refeicao.nome == "Almoço"
+    assert "turno" not in resposta.model_dump(by_alias=True)
+
+
+def test_aviso_de_historico_sem_refeicao():
+    com_legado = calcular_indicadores(_request(historico_sem_refeicao=12))
+    sem_legado = calcular_indicadores(_request(historico_sem_refeicao=0))
+
+    assert any(a.startswith("12 registros do histórico do legado") for a in com_legado.avisos)
+    assert not any("legado" in aviso for aviso in sem_legado.avisos)
 
 
 def test_motivo_por_turma_nao_cita_turma_atual_do_cadastro():
@@ -201,3 +219,167 @@ def test_motivo_por_turma_nao_cita_turma_atual_do_cadastro():
     assert "atual do cadastro" not in motivo
     assert "vigente na data do consumo" in motivo
     assert not any("atual do cadastro" in aviso for aviso in resposta.avisos)
+
+
+def _fechamento(nome, preparadas, servidas, resto, fechamentos=1, receita_id=None):
+    return ReceitaFechamento(
+        receita_id=receita_id or f"00000000-0000-0000-0000-{abs(hash(nome)) % 10**12:012d}",
+        nome=nome, porcoes_preparadas=preparadas, porcoes_servidas=servidas,
+        sobra_nao_distribuida=preparadas - servidas, resto_no_prato=resto, fechamentos=fechamentos)
+
+
+def _dias(atendidos, planejadas):
+    return [AtendimentoDia(data=f"2026-09-{n + 1:02d}", planejadas=p, atendidos=a)
+            for n, (a, p) in enumerate(zip(atendidos, planejadas))]
+
+
+def test_sem_escopo_de_cardapio_com_fechamentos_avalia_aceitacao_e_desperdicio():
+    fechamentos = [_fechamento("Sopa de legumes", 100, 90, 9) for _ in range(21)]
+
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=fechamentos, quantidade_fechamentos_do_mes=21,
+        cobertura_fechamentos_completa=False))
+
+    assert resposta.aceitacao.status == "DISPONIVEL"
+    assert resposta.aceitacao.percentual == 90.0
+    assert resposta.desperdicio.status == "DISPONIVEL"
+    assert resposta.desperdicio.percentual == 19.0
+
+
+def test_com_escopo_a_cobertura_incompleta_continua_recusando():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Sopa", 100, 90, 9) for _ in range(21)],
+        datas_selecionadas=["2026-09-01"], cobertura_fechamentos_completa=False))
+
+    assert resposta.aceitacao.status == "DADOS_INSUFICIENTES"
+
+
+def test_sobra_percentual_por_item():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Arroz", 100, 82, 0, fechamentos=3)],
+        fechamentos_da_semana=[_fechamento("Arroz", 100, 82, 0)]))
+
+    assert resposta.aceitacao_itens[0].sobra_percentual == 18.0
+    assert resposta.aceitacao_itens_semana[0].sobra_percentual == 18.0
+    assert resposta.model_dump(by_alias=True)["aceitacaoItens"][0]["sobraPercentual"] == 18.0
+
+
+def test_sobra_percentual_nula_sem_preparado():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Fruta", 0, 0, 0, fechamentos=3)]))
+
+    assert resposta.aceitacao_itens[0].sobra_percentual is None
+
+
+def test_plano_revisar_preparacao_abaixo_de_90():
+    # Preparado = servido: só a aceitação (resto) aparece no plano.
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Sopa de legumes", 100, 100, 18, fechamentos=6)]))
+
+    acao = resposta.plano_de_acao[0]
+    assert acao.tipo == "REVISAR_PREPARACAO"
+    assert acao.item == "Sopa de legumes"
+    assert acao.texto == ("Revisar a preparação de Sopa de legumes: aceitação de 82% (meta 90%) "
+                          "em 6 dias medidos.")
+    assert acao.valor == 82.0
+    assert acao.referencia == 90.0
+    assert len(resposta.plano_de_acao) == 1
+
+
+def test_plano_ignora_item_com_menos_de_3_fechamentos():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Sopa de legumes", 100, 100, 40, fechamentos=2)]))
+
+    assert resposta.plano_de_acao == []
+
+
+def test_plano_reduzir_preparo_sobra_acima_de_10():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Iogurte", 100, 82, 0, fechamentos=5)]))
+
+    acao = resposta.plano_de_acao[0]
+    assert acao.tipo == "REDUZIR_PREPARO"
+    assert acao.texto == ("Preparar menos Iogurte: sobrou na panela 18% do que foi preparado "
+                          "em 5 dias medidos.")
+    assert (acao.valor, acao.referencia) == (18.0, 10.0)
+
+
+def test_plano_rever_planejamento_abaixo_de_80():
+    resposta = calcular_indicadores(_request(
+        atendimento_diario=_dias([38, 38, 38, 39, 39], [101] * 5),
+        fechamentos_do_mes=[_fechamento("Sopa de legumes", 100, 100, 18, fechamentos=6)]))
+
+    primeira = resposta.plano_de_acao[0]
+    assert primeira.tipo == "REVER_PLANEJAMENTO"
+    assert primeira.texto == ("Rever a quantidade planejada: em média 38 refeições servidas por dia "
+                              "para 101 planejadas (38%).")
+    assert primeira.valor == 38.0
+    assert primeira.referencia == 80.0
+    assert primeira.item is None and primeira.receita_id is None
+    assert resposta.plano_de_acao[1].tipo == "REVISAR_PREPARACAO"
+
+
+def test_plano_reduzir_preparo_sobra_exatamente_10_gera_acao():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Iogurte", 100, 90, 0, fechamentos=5)]))
+
+    assert [a.tipo for a in resposta.plano_de_acao] == ["REDUZIR_PREPARO"]
+
+
+def test_plano_reduzir_preparo_texto_com_casa_decimal():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Iogurte", 1000, 825, 0, fechamentos=5)]))
+
+    assert "sobrou na panela 17,5% do que foi preparado" in resposta.plano_de_acao[0].texto
+
+
+def test_plano_aceitacao_exatamente_90_nao_gera_acao():
+    resposta = calcular_indicadores(_request(
+        fechamentos_do_mes=[_fechamento("Arroz", 100, 100, 10, fechamentos=5)]))
+
+    assert resposta.plano_de_acao == []
+
+
+def test_plano_limiar_usa_valor_arredondado_mostrado():
+    # 89,96% de aceitação aparece como 90 e 79,96% de atendimento aparece como 80.
+    resposta = calcular_indicadores(_request(
+        atendimento_diario=_dias([7996], [10000]),
+        fechamentos_do_mes=[_fechamento("Arroz", 10000, 10000, 1004, fechamentos=5)]))
+
+    assert resposta.plano_de_acao == []
+
+
+def test_plano_vazio_quando_tudo_dentro_das_metas():
+    resposta = calcular_indicadores(_request(
+        atendimento_diario=_dias([90, 85], [100, 100]),
+        fechamentos_do_mes=[_fechamento("Arroz", 100, 95, 5, fechamentos=5)]))
+
+    assert resposta.plano_de_acao == []
+
+
+def test_medias_ignoram_dias_sem_cardapio():
+    resposta = calcular_indicadores(_request(
+        atendimento_diario=_dias([40, 0, 60, 0], [100, 0, 100, 0])))
+
+    assert resposta.execucao_planejamento.media_atendidos_dia == 50.0
+    assert resposta.execucao_planejamento.media_planejada_dia == 100.0
+
+
+def test_medias_nulas_sem_dias_com_cardapio():
+    resposta = calcular_indicadores(_request())
+
+    assert resposta.execucao_planejamento.media_atendidos_dia is None
+    assert resposta.execucao_planejamento.media_planejada_dia is None
+    assert resposta.plano_de_acao == []
+
+
+def test_motivos_nao_usam_jargao_antigo():
+    sem_dados = calcular_indicadores(_request())
+    pequeno = calcular_indicadores(_request(medicao_do_dia=MedicaoDoDia(
+        porcoes_preparadas=4, porcoes_servidas=3, sobra_nao_distribuida=1,
+        resto_no_prato=0, itens_medidos=1, itens_do_cardapio=1)))
+    textos = " ".join(
+        r.aceitacao.motivo + r.desperdicio.motivo for r in (sem_dados, pequeno))
+
+    for antigo in ("cuba", "não distribuída", "denominador"):
+        assert antigo not in textos

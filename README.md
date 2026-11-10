@@ -10,7 +10,7 @@ O protótipo é formado por três repositórios que rodam juntos:
 
 | Repositório | Papel | Stack | Porta local |
 |---|---|---|---|
-| `front-merenda-escolar` | Telas: fila (QR Code e facial), cardápio, fechamento de turno, cadastro de alunos e turmas, dashboard | Angular 20, Tailwind 4, Chart.js, html5-qrcode | 4200 |
+| `front-merenda-escolar` | Telas: fila (QR Code e facial), cardápio, fechamento da refeição, cadastro de alunos e turmas, dashboard | Angular 20, Tailwind 4, Chart.js, html5-qrcode | 4200 |
 | `api-merenda-escolar` | Regras de negócio, persistência, auditoria da fila, consolidação, jobs de relatório com LLM | Spring Boot 3.5, Java 25, Spring AI, Flyway, H2 em arquivo | 8081 |
 | `analytics-merenda-escolar` | Cálculos determinísticos (indicadores, tendências, previsão) e reconhecimento facial (DeepFace) | FastAPI, Python 3.12+ | 8000 |
 
@@ -180,9 +180,9 @@ O JSON trafega em camelCase (aliases do Pydantic) e o código Python usa snake_c
 | Método | Caminho | O que faz |
 |---|---|---|
 | `GET` | `/health` | Verificação de vida; devolve `{"status":"UP"}`. |
-| `POST` | `/api/v1/indicadores-logisticos` | Indicadores do dia/turno e das janelas de 7 e 30 dias: execução do planejamento, atendimentos, ranking de itens, aceitação, desperdício, ingredientes e turmas. |
+| `POST` | `/api/v1/indicadores-logisticos` | Indicadores do dia/refeição e das janelas de 7 e 30 dias: execução do planejamento, atendimentos, ranking de itens, aceitação, desperdício, ingredientes e turmas. |
 | `POST` | `/api/v1/tendencias-item` | Classifica a série de taxas de execução de cada item em `QUEDA`, `ESTAVEL` ou `ALTA`. |
-| `POST` | `/api/v1/previsoes-consumo` | Estima a demanda do turno a partir do realizado do dia e do histórico. |
+| `POST` | `/api/v1/previsoes-consumo` | Estima a demanda da refeição a partir do realizado do dia e do histórico. |
 | `POST` | `/api/v1/reconhecimento-facial/embeddings` | Gera o embedding da foto de referência do aluno (cadastro do rosto). |
 | `POST` | `/api/v1/reconhecimento-facial/identificacoes` | Identifica quem é a pessoa da foto entre os candidatos recebidos (1:N). |
 
@@ -191,19 +191,34 @@ O JSON trafega em camelCase (aliases do Pydantic) e o código Python usa snake_c
 `POST /api/v1/indicadores-logisticos` recebe dados já agregados pela API. O contrato rejeita campos
 desconhecidos (`extra="forbid"`): campo a mais ou a menos do lado Java vira HTTP 422.
 
-Entrada: `dataReferencia`, `inicioHistorico`, `turno` (`MANHA`, `TARDE`, `NOITE` ou `INTEGRAL`),
+Entrada: `dataReferencia`, `inicioHistorico`, `refeicao` (`{"id", "nome"}`, a refeição da grade da API:
+Café da manhã, Lanche da manhã, Almoço, Lanche da tarde ou Lanche da noite), `historicoSemRefeicao`
+(opcional, padrão 0: quantos registros do histórico do legado a API não conseguiu ligar a uma refeição),
 `quantidadePlanejada`, `consumosRegistrados`, `alunosUnicos`, `metaPercentual` (padrão 80),
 `turmas`, `itens`, `medicaoDoDia`, `receitasMedidas`, `fechamentosDoMes`, `fechamentosDaSemana`,
 `quantidadeFechamentosDoMes`, `quantidadeFechamentosDaSemana`, `datasFechamentosDoMes`,
-`receitasSelecionadas`, `datasSelecionadas` e `coberturaFechamentosCompleta`.
+`receitasSelecionadas`, `datasSelecionadas`, `coberturaFechamentosCompleta` e `atendimentoDiario`
+(opcional: `[{data, planejadas, atendidos}]` dos dias da janela; dia com `planejadas` 0 é tratado como dia sem
+cardápio e fica fora das médias).
 
-Saída versionada (`schemaVersion="4"`, `calculoVersao="indicadores-v1"`): `execucaoPlanejamento`,
+Saída versionada (`schemaVersion="6"`, `calculoVersao="indicadores-v1"`): `refeicao` (devolvida como veio),
+`execucaoPlanejamento`,
 `atendimentos`, `topComidas`, `aceitacaoItens`, `aceitacaoItensSemana`,
 `quantidadeFechamentosDoMes`, `quantidadeFechamentosDaSemana`, `datasFechamentosDoMes`, `porTurma`,
-`aceitacao`, `desperdicio`, `ingredientes`, `rotacaoCardapio` e `avisos`.
+`aceitacao`, `desperdicio`, `ingredientes`, `rotacaoCardapio`, `planoDeAcao` e `avisos`.
 
-A API só aceita resposta nova com `schemaVersion="4"` (`PythonIndicadoresLogisticosAdapter`).
-Relatórios já persistidos com `"2"` ou `"3"` continuam legíveis: a API devolve a fotografia gravada
+A versão 6 acrescenta: `sobraPercentual` em cada item de `aceitacaoItens` e `aceitacaoItensSemana`
+((preparado - servido) / preparado, 1 casa; nulo sem preparado); `mediaAtendidosDia` e `mediaPlanejadaDia` em
+`execucaoPlanejamento` (nulos sem `atendimentoDiario`); e `planoDeAcao`, lista determinística de
+`{tipo, receitaId, item, texto, valor, referencia}` com os tipos `REVER_PLANEJAMENTO` (atendimento médio abaixo de
+80% do planejado, sempre primeiro), `REVISAR_PREPARACAO` (aceitação do item abaixo de 90%) e `REDUZIR_PREPARO`
+(sobra na panela a partir de 10%). Itens com menos de 3 fechamentos ficam fora do plano. Sem escopo de cardápio
+(`datasSelecionadas` e `receitasSelecionadas` vazios) os fechamentos da janela são a cobertura: aceitação e
+desperdício deixam de ser "não avaliáveis" por causa de `coberturaFechamentosCompleta`.
+
+A versão 5 troca `turno` por `refeicao` no pedido e na resposta. A API só aceita resposta nova com
+`schemaVersion="6"` (`PythonIndicadoresLogisticosAdapter`) e também confere que o `refeicao.id` devolvido
+é o que enviou. Relatórios já persistidos com `"2"`, `"3"` ou `"4"` continuam legíveis: a API devolve a fotografia gravada
 e o front trata a ausência de `turmaId` nessas versões. Mudou o contrato de saída, suba a versão
 aqui e no adapter Java juntos.
 
@@ -211,12 +226,14 @@ Regras de cálculo:
 
 - **Meta:** a comparação é feita antes do arredondamento (79,999% não atinge 80%). Sem refeições
   planejadas, o percentual é nulo e o status é `NAO_AVALIAVEL`.
-- **Repetições:** consumos registrados menos alunos únicos do mesmo dia/turno.
+- **Repetições:** consumos registrados menos alunos únicos do mesmo dia e refeição.
 - **Ranking (`topComidas`):** execuções registradas / planejamentos, mínimo de 5 planejamentos por
   item, top 10, desempate pelo tamanho da amostra e depois pelo nome. Não é ranking de aceitação
   nem de refeições completas.
 - Quantidade servida zero conta como registro; ausência de registro não comprova rejeição.
-- **Turmas:** `turmas` recebe `turmaId` (nulo no balde "Sem turma") e `turma` (texto obrigatório);
+- **Histórico sem refeição:** com `historicoSemRefeicao` maior que zero, `avisos` ganha a quantidade de
+  registros do legado (lanches mistos, turno estendido) que ficaram fora da análise por refeição.
+- **Turmas:** os indicadores por turma continuam, agora dentro de uma refeição. `turmas` recebe `turmaId` (nulo no balde "Sem turma") e `turma` (texto obrigatório);
   a resposta repete `turmaId` em cada item de `porTurma`. `turma` nula é rejeitada com HTTP 422.
 - Sem presença elegível, a adesão por turma não é calculada: cada turma segue `NAO_AVALIAVEL`,
   mesmo com a turma modelada na API.
@@ -224,8 +241,7 @@ Regras de cálculo:
   `aceitacaoItensSemana` exige 1.
 - **Aceitação e desperdício do período:** com fechamentos na janela, usam a soma dos fechamentos do
   mês e só são classificados quando `coberturaFechamentosCompleta` vem `true`; sem fechamentos,
-  usam `medicaoDoDia`, que precisa cobrir todas as receitas do cardápio. Abaixo de 30 porções no
-  denominador, o resultado é `DADOS_INSUFICIENTES`.
+  usam `medicaoDoDia`, que precisa cobrir todas as receitas do cardápio. Abaixo de 30 porções registradas, o resultado é `DADOS_INSUFICIENTES`.
 - **Faixas (convenção do protótipo, não medidas em produção):** aceitação `ALTA` a partir de 90% e
   `MEDIA` a partir de 75%; desperdício `BAIXO` até 10% e `MEDIO` até 20%. As constantes ficam no
   topo de `app/domain/indicadores_logisticos.py`.
@@ -237,7 +253,7 @@ Regras de cálculo:
 
 ### Escopos dos indicadores
 
-O dia e o turno de referência representam a fotografia operacional: planejamento, autorizações,
+O dia e a refeição de referência representam a fotografia operacional: planejamento, autorizações,
 bloqueios e registros por turma. A aceitação e o desperdício são calculados a partir dos
 fechamentos da merendeira dos últimos 7 ou 30 dias até a data de referência (a janela é montada
 pela API, em `IndicadoresDadosService`).
@@ -248,7 +264,8 @@ pelos ids de `receitasSelecionadas`. Registros da fila não são tratados como p
 
 ### Previsão de consumo
 
-`POST /api/v1/previsoes-consumo`. A demanda estimada é a média do `historico` enviado, com o
+`POST /api/v1/previsoes-consumo`. Recebe `refeicao` (o nome da refeição, texto) no lugar do antigo
+`turno`. A demanda estimada é a média do `historico` enviado, com o
 realizado do dia como piso (prever abaixo do que já aconteceu é impossível). A confiança depende do
 tamanho do histórico: 7 ou mais registros `ALTA`, de 3 a 6 `MEDIA`, menos que isso `BAIXA`. O
 `riscoDesperdicio` é sempre `NAO_AVALIAVEL`: a diferença entre planejamento e autorizações é sobra
@@ -259,7 +276,7 @@ Request:
 ```json
 {
   "dataReferencia": "2026-08-26",
-  "turno": "NOITE",
+  "refeicao": "Lanche da noite",
   "cardapio": "Arroz, feijao, frango e salada",
   "quantidadePlanejada": 300,
   "consumosAutorizados": 120,
@@ -412,10 +429,10 @@ roda em cerca de um segundo.
   rosto detectável pelo `opencv` ou, no cadastro, tem mais de um rosto. "Não reconhecido" e
   "ambíguo" são HTTP 200, na `decisao`.
 - **Dashboard com indicadores indisponíveis.** A API registra no log
-  `Indicadores indisponíveis para <data> / <turno>: <exceção>` e devolve os indicadores com
+  `Indicadores indisponíveis para <data> / <refeição>: <exceção>` e devolve os indicadores com
   `status="INDISPONIVEL"`. Causas
   vistas no código: este serviço fora do ar, HTTP 422 por contrato divergente (o pedido aceita só
-  os campos conhecidos) ou resposta com `schemaVersion` diferente de `"4"`.
+  os campos conhecidos) ou resposta com `schemaVersion` diferente de `"6"`.
 - **Avisos de depreciação no pytest.** Os dois avisos do starlette/httpx sobre o `TestClient` não
   indicam falha.
 - **`ruff check .` não sai limpo.** Hoje ele aponta 5 problemas em

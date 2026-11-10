@@ -106,10 +106,23 @@ class ReceitaFechamento(Contrato):
         return self
 
 
+class RefeicaoRef(Contrato):
+    id: str = Field(min_length=1, max_length=64)
+    nome: str = Field(min_length=1, max_length=80)
+
+
+class AtendimentoDia(Contrato):
+    """Dia da janela com cardápio da refeição. Planejadas zero conta como dia sem cardápio."""
+    data: date
+    planejadas: int = Field(ge=0)
+    atendidos: int = Field(ge=0)
+
+
 class IndicadoresRequest(Contrato):
     data_referencia: date
     inicio_historico: date
-    turno: Literal["MANHA", "TARDE", "NOITE", "INTEGRAL"]
+    refeicao: RefeicaoRef
+    historico_sem_refeicao: int = Field(default=0, ge=0)
     quantidade_planejada: int = Field(ge=0)
     consumos_registrados: int = Field(ge=0)
     alunos_unicos: int = Field(ge=0)
@@ -126,6 +139,7 @@ class IndicadoresRequest(Contrato):
     receitas_selecionadas: list[str] = Field(default_factory=list)
     datas_selecionadas: list[date] = Field(default_factory=list)
     cobertura_fechamentos_completa: bool = False
+    atendimento_diario: list[AtendimentoDia] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validar(self) -> Self:
@@ -143,6 +157,8 @@ class ExecucaoPlanejamento(Contrato):
     meta_percentual: float
     diferenca_meta_pp: float | None
     status_meta: Literal["ATINGIDA", "ABAIXO", "NAO_AVALIAVEL"]
+    media_atendidos_dia: float | None = None
+    media_planejada_dia: float | None = None
 
 
 class Atendimentos(Contrato):
@@ -163,7 +179,17 @@ class AceitacaoItem(Contrato):
     porcoes_consumidas: int
     resto_no_prato: int
     percentual: float | None
+    sobra_percentual: float | None = None
     fechamentos: int
+
+
+class AcaoPlano(Contrato):
+    tipo: Literal["REVISAR_PREPARACAO", "REDUZIR_PREPARO", "REVER_PLANEJAMENTO"]
+    receita_id: str | None = None
+    item: str | None = None
+    texto: str
+    valor: float
+    referencia: float
 
 
 class TurmaIndicadores(ContagemTurma):
@@ -179,6 +205,12 @@ ACEITACAO_ALTA = Decimal(90)
 ACEITACAO_MEDIA = Decimal(75)
 DESPERDICIO_BAIXO = Decimal(10)
 DESPERDICIO_MEDIO = Decimal(20)
+
+# Metas do plano de ação: aceitação PNAE (resto-ingestão), sobra na panela e atendimento do planejado.
+META_ACEITACAO = Decimal(90)
+META_SOBRA_NA_PANELA = Decimal(10)
+META_ATENDIMENTO = Decimal(80)
+MINIMO_FECHAMENTOS_ITEM = 3
 
 # Abaixo disso a media do ingrediente oscila demais para sustentar qualquer afirmacao.
 AMOSTRA_MINIMA_INGREDIENTE = 30
@@ -203,7 +235,7 @@ class Aceitacao(Contrato):
 
 
 class Desperdicio(Contrato):
-    """Perda sobre o que foi preparado: sobra na cuba mais resto no prato."""
+    """Perda sobre o que foi preparado: sobra na panela mais resto no prato."""
     status: Literal["DISPONIVEL", "DADOS_INSUFICIENTES"]
     risco: Literal["ALTO", "MEDIO", "BAIXO", "NAO_AVALIAVEL"]
     percentual: float | None = None
@@ -236,12 +268,12 @@ class AnaliseIndisponivel(Contrato):
 
 
 class IndicadoresResponse(Contrato):
-    schema_version: str = "4"
+    schema_version: str = "6"
     calculo_versao: str = "indicadores-v1"
     status: str = "DISPONIVEL"
     data_referencia: date
     inicio_historico: date
-    turno: str
+    refeicao: RefeicaoRef
     execucao_planejamento: ExecucaoPlanejamento
     atendimentos: Atendimentos
     top_comidas: list[ItemRanking]
@@ -255,6 +287,7 @@ class IndicadoresResponse(Contrato):
     desperdicio: Desperdicio
     ingredientes: AnaliseIngredientes
     rotacao_cardapio: AnaliseIndisponivel
+    plano_de_acao: list[AcaoPlano]
     avisos: list[str]
 
 
@@ -286,12 +319,16 @@ def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
         "entra em \"Sem turma\".",
     ]
     if request.medicao_do_dia is None:
-        avisos.append("Sem medição de sobra lançada para este dia e turno: aceitação e "
+        avisos.append("Sem medição de sobra lançada para este dia e refeição: aceitação e "
                       "desperdício ficam indisponíveis até alguém registrar.")
     else:
         medicao = request.medicao_do_dia
         avisos.append(f"No dia de referência, a medição de sobra cobre {medicao.itens_medidos} de "
                       f"{medicao.itens_do_cardapio} receitas do cardápio.")
+    if request.historico_sem_refeicao > 0:
+        avisos.append(f"{request.historico_sem_refeicao} registros do histórico do legado não têm "
+                      f"refeição correspondente (lanches mistos, turno estendido) e ficaram fora "
+                      f"da análise por refeição.")
     if request.receitas_medidas:
         avisos.append(f"Análise histórica de ingredientes baseada em {len(request.receitas_medidas)} tipos "
                       f"de receita com medição na janela; o resto é medido por prato inteiro, então "
@@ -301,18 +338,21 @@ def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
         avisos.append("Origens do histórico: " + ", ".join(origens) + ".")
     if not ranking:
         avisos.append("Sem itens com amostra suficiente para o ranking neste período.")
-    aceitacao_itens = _calcular_aceitacao_itens(fechamentos_mes, min_fechamentos=3)
+    aceitacao_itens = _calcular_aceitacao_itens(fechamentos_mes, min_fechamentos=MINIMO_FECHAMENTOS_ITEM)
+    media_atendidos, media_planejada = _medias_diarias(request.atendimento_diario)
     aceitacao_itens_semana = _calcular_aceitacao_itens(fechamentos_semana, min_fechamentos=1)
     return IndicadoresResponse(
         data_referencia=request.data_referencia,
         inicio_historico=request.inicio_historico,
-        turno=request.turno,
+        refeicao=request.refeicao,
         execucao_planejamento=ExecucaoPlanejamento(
             refeicoes_planejadas=request.quantidade_planejada,
             consumos_registrados=request.consumos_registrados,
             percentual=_arredondar(taxa), meta_percentual=request.meta_percentual,
             diferenca_meta_pp=_arredondar(taxa - meta) if taxa is not None else None,
             status_meta=status,
+            media_atendidos_dia=_arredondar1(media_atendidos),
+            media_planejada_dia=_arredondar1(media_planejada),
         ),
         atendimentos=Atendimentos(
             alunos_unicos=request.alunos_unicos,
@@ -336,8 +376,63 @@ def calcular_indicadores(request: IndicadoresRequest) -> IndicadoresResponse:
         rotacao_cardapio=AnaliseIndisponivel(
             motivo="Faltam séries de oferta e adesão comparáveis para recomendar um ciclo."
         ),
+        plano_de_acao=_montar_plano(aceitacao_itens, media_atendidos, media_planejada),
         avisos=avisos,
     )
+
+
+def _medias_diarias(dias: list[AtendimentoDia]) -> tuple[Decimal | None, Decimal | None]:
+    com_cardapio = [dia for dia in dias if dia.planejadas > 0]
+    if not com_cardapio:
+        return None, None
+    return (Decimal(sum(dia.atendidos for dia in com_cardapio)) / len(com_cardapio),
+            Decimal(sum(dia.planejadas for dia in com_cardapio)) / len(com_cardapio))
+
+
+def _montar_plano(
+    itens: list[AceitacaoItem], media_atendidos: Decimal | None, media_planejada: Decimal | None
+) -> list[AcaoPlano]:
+    plano: list[AcaoPlano] = []
+    if media_atendidos is not None and media_planejada:
+        taxa = media_atendidos * 100 / media_planejada
+        if _arredondar1(taxa) < META_ATENDIMENTO:
+            plano.append(AcaoPlano(
+                tipo="REVER_PLANEJAMENTO",
+                texto=f"Rever a quantidade planejada: em média {_texto_numero(media_atendidos, 0)} "
+                      f"refeições servidas por dia para "
+                      f"{_texto_numero(media_planejada, 0)} planejadas "
+                      f"({_texto_numero(taxa)}%).",
+                valor=_arredondar1(taxa), referencia=float(META_ATENDIMENTO),
+            ))
+    # Só entram itens com amostra mínima; a lista de itens já vem filtrada por ela.
+    abaixo = sorted(
+        (i for i in itens if i.percentual is not None
+         and _arredondar1(Decimal(str(i.percentual))) < META_ACEITACAO),
+        key=lambda i: (i.percentual, i.item),
+    )
+    for item in abaixo:
+        plano.append(AcaoPlano(
+            tipo="REVISAR_PREPARACAO", receita_id=item.receita_id, item=item.item,
+            texto=f"Revisar a preparação de {item.item}: aceitação de "
+                  f"{_texto_numero(Decimal(str(item.percentual)))}% (meta {_texto_numero(META_ACEITACAO)}%) "
+                  f"em {item.fechamentos} dias medidos.",
+            valor=_arredondar1(Decimal(str(item.percentual))), referencia=float(META_ACEITACAO),
+        ))
+    sobrando = sorted(
+        (i for i in itens if i.sobra_percentual is not None
+         and _arredondar1(Decimal(str(i.sobra_percentual))) >= META_SOBRA_NA_PANELA),
+        key=lambda i: (-i.sobra_percentual, i.item),
+    )
+    for item in sobrando:
+        plano.append(AcaoPlano(
+            tipo="REDUZIR_PREPARO", receita_id=item.receita_id, item=item.item,
+            texto=f"Preparar menos {item.item}: sobrou na panela "
+                  f"{_texto_numero(Decimal(str(item.sobra_percentual)))}% do que foi preparado "
+                  f"em {item.fechamentos} dias medidos.",
+            valor=_arredondar1(Decimal(str(item.sobra_percentual))),
+            referencia=float(META_SOBRA_NA_PANELA),
+        ))
+    return plano
 
 
 def _calcular_aceitacao_itens(
@@ -373,6 +468,9 @@ def _calcular_aceitacao_itens(
         resto = agregado["resto_no_prato"]
         consumidas = max(0, servidas - resto)
         percentual = _arredondar(Decimal(consumidas) * 100 / servidas) if servidas else None
+        preparadas = agregado["porcoes_preparadas"]
+        sobra = (_arredondar1(Decimal(preparadas - servidas) * 100 / preparadas)
+                 if preparadas else None)
         itens.append(AceitacaoItem(
             receita_id=agregado["receita_id"],
             item=agregado["item"],
@@ -381,6 +479,7 @@ def _calcular_aceitacao_itens(
             porcoes_consumidas=consumidas,
             resto_no_prato=resto,
             percentual=percentual,
+            sobra_percentual=sobra,
             fechamentos=agregado["fechamentos"],
         ))
     return sorted(itens, key=lambda item: (item.percentual is None,
@@ -404,10 +503,17 @@ def _medicao_para_periodo(
                 item.sobra_nao_distribuida for item in fechamentos
             ),
             resto_no_prato=sum(item.resto_no_prato for item in fechamentos),
-            itens_medidos=1 if request.cobertura_fechamentos_completa else 0,
+            itens_medidos=1 if _cobertura_dos_fechamentos(request) else 0,
             itens_do_cardapio=1,
         )
     return request.medicao_do_dia
+
+
+def _cobertura_dos_fechamentos(request: IndicadoresRequest) -> bool:
+    # Sem escopo de cardápio a análise é da refeição na janela: os fechamentos são a cobertura.
+    # O campo só pesa quando há escopo, onde a API diz se todas as datas escolhidas foram medidas.
+    sem_escopo = not request.datas_selecionadas and not request.receitas_selecionadas
+    return sem_escopo or request.cobertura_fechamentos_completa
 
 
 def _filtrar_receitas(
@@ -436,7 +542,7 @@ def _base_insuficiente(medicao: MedicaoDoDia, denominador: int) -> str | None:
         return (f"Medição cobre {medicao.itens_medidos} de {medicao.itens_do_cardapio} itens do "
                 f"cardápio. O indicador é do cardápio inteiro, não de parte dele.")
     if denominador < PORCOES_MINIMAS_DIA:
-        return (f"Apenas {denominador} porções no denominador, abaixo do mínimo de "
+        return (f"Apenas {denominador} porções registradas, abaixo do mínimo de "
                 f"{PORCOES_MINIMAS_DIA} para classificar.")
     return None
 
@@ -468,7 +574,7 @@ def _calcular_desperdicio(medicao: MedicaoDoDia | None) -> Desperdicio:
     if medicao is None or medicao.porcoes_preparadas == 0:
         return Desperdicio(
             status="DADOS_INSUFICIENTES", risco="NAO_AVALIAVEL",
-            motivo="Sem medição de sobra não distribuída e resto no prato. Diferença entre "
+            motivo="Sem medição de sobra na panela e resto no prato. Diferença entre "
                    "planejamento e autorizações é sobra de planejamento, não desperdício.",
         )
 
@@ -485,7 +591,7 @@ def _calcular_desperdicio(medicao: MedicaoDoDia | None) -> Desperdicio:
         porcoes_preparadas=medicao.porcoes_preparadas,
         sobra_nao_distribuida=medicao.sobra_nao_distribuida,
         resto_no_prato=medicao.resto_no_prato,
-        motivo="Perda sobre o preparado: sobra na cuba mais resto no prato.",
+        motivo="Perda sobre o preparado: sobra na panela mais resto no prato.",
     )
 
 
@@ -558,3 +664,17 @@ def _arredondar(valor: Decimal | None) -> float | None:
     if valor is None:
         return None
     return float(valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _arredondar1(valor: Decimal | None) -> float | None:
+    if valor is None:
+        return None
+    return float(valor.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def _texto_numero(valor: Decimal, casas: int = 1) -> str:
+    """pt-BR, no máximo `casas` decimais e sem ',0' ao final."""
+    texto = f"{valor.quantize(Decimal(1).scaleb(-casas), rounding=ROUND_HALF_UP):f}"
+    if "." in texto:
+        texto = texto.rstrip("0").rstrip(".")
+    return texto.replace(".", ",")

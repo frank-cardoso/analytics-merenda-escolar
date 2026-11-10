@@ -26,7 +26,7 @@ class PrevisaoConsumoRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     data_referencia: str = Field(alias="dataReferencia")
-    turno: str
+    refeicao: str
     cardapio: str
     quantidade_planejada: int = Field(alias="quantidadePlanejada", ge=0)
     consumos_autorizados: int = Field(alias="consumosAutorizados", ge=0)
