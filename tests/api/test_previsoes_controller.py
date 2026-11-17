@@ -10,7 +10,7 @@ def test_cria_previsao_de_consumo():
         "/api/v1/previsoes-consumo",
         json={
             "dataReferencia": "2026-08-26",
-            "turno": "NOITE",
+            "refeicao": "Lanche da noite",
             "cardapio": "Arroz, feijao, frango e salada",
             "quantidadePlanejada": 300,
             "consumosAutorizados": 1,
@@ -52,3 +52,21 @@ def test_health_check():
 
     assert response.status_code == 200
     assert response.json() == {"status": "UP"}
+
+
+def test_previsao_sem_refeicao_e_recusada():
+    response = TestClient(app).post(
+        "/api/v1/previsoes-consumo",
+        json={
+            "dataReferencia": "2026-08-26",
+            "cardapio": "Arroz, feijao, frango e salada",
+            "quantidadePlanejada": 300,
+            "consumosAutorizados": 1,
+            "tentativasBloqueadas": 3,
+            "taxaConsumoPlanejado": 0.33,
+            "sobraDePlanejamento": 299,
+            "historico": [],
+        },
+    )
+
+    assert response.status_code == 422

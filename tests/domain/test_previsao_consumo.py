@@ -8,7 +8,7 @@ from app.domain.previsao_consumo import (
 def _request(**alteracoes) -> PrevisaoConsumoRequest:
     base = {
         "data_referencia": "2026-08-26",
-        "turno": "NOITE",
+        "refeicao": "Lanche da noite",
         "cardapio": "Arroz, feijao, frango e salada",
         "quantidade_planejada": 300,
         "consumos_autorizados": 1,

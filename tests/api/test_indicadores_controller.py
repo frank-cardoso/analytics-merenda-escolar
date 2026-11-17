@@ -7,10 +7,12 @@ client = TestClient(app)
 
 def payload():
     return {
-        "dataReferencia": "2026-09-17", "inicioHistorico": "2026-08-19", "turno": "MANHA",
+        "dataReferencia": "2026-09-17", "inicioHistorico": "2026-08-19",
+        "refeicao": {"id": "5e1a0000-0000-4000-8000-000000000002", "nome": "Lanche da manhã"},
         "quantidadePlanejada": 100, "consumosRegistrados": 80, "alunosUnicos": 70,
         "metaPercentual": 80,
-        "turmas": [{"turma": "A", "consumosRegistrados": 80, "alunosUnicos": 70}],
+        "turmas": [{"turmaId": "00000000-0000-0000-0000-0000000000a1", "turma": "A",
+                    "consumosRegistrados": 80, "alunosUnicos": 70}],
         "itens": [
             {"item": "Arroz", "planejamentos": 10, "execucoesRegistradas": 8,
              "escolas": 2, "origens": ["FAKE"]},
@@ -29,6 +31,7 @@ def test_meta_e_repeticoes_nao_confundem_refeicoes_com_alunos():
     assert result["execucaoPlanejamento"]["percentual"] == 80
     assert result["execucaoPlanejamento"]["statusMeta"] == "ATINGIDA"
     assert result["atendimentos"]["repeticoes"] == 10
+    assert result["porTurma"][0]["turmaId"] == "00000000-0000-0000-0000-0000000000a1"
     assert result["porTurma"][0]["percentual"] is None
     assert result["porTurma"][0]["statusMeta"] == "NAO_AVALIAVEL"
 
@@ -64,3 +67,38 @@ def test_rejeita_contagens_inconsistentes_e_datas_invertidas():
     request = payload()
     request["inicioHistorico"] = "2026-09-18"
     assert client.post("/api/v1/indicadores-logisticos", json=request).status_code == 422
+
+
+def test_sem_refeicao_e_recusado():
+    corpo = payload()
+    del corpo["refeicao"]
+
+    response = client.post("/api/v1/indicadores-logisticos", json=corpo)
+
+    assert response.status_code == 422
+
+
+def test_turno_nao_e_mais_aceito():
+    corpo = payload()
+    corpo["turno"] = "MANHA"
+
+    response = client.post("/api/v1/indicadores-logisticos", json=corpo)
+
+    assert response.status_code == 422
+
+
+def test_schema_6_com_plano_de_acao_e_medias():
+    body = payload()
+    body["atendimentoDiario"] = [
+        {"data": "2026-09-16", "planejadas": 100, "atendidos": 50},
+        {"data": "2026-09-17", "planejadas": 100, "atendidos": 70},
+    ]
+    response = client.post("/api/v1/indicadores-logisticos", json=body)
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["schemaVersion"] == "6"
+    assert result["execucaoPlanejamento"]["mediaAtendidosDia"] == 60.0
+    assert result["execucaoPlanejamento"]["mediaPlanejadaDia"] == 100.0
+    assert result["planoDeAcao"][0]["tipo"] == "REVER_PLANEJAMENTO"
+    assert set(result["planoDeAcao"][0]) == {"tipo", "receitaId", "item", "texto", "valor", "referencia"}

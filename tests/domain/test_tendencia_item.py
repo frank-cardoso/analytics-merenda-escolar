@@ -24,7 +24,7 @@ def test_classifica_alta_quando_media_da_segunda_metade_sobe_bem_acima_da_primei
 
 def test_classifica_estavel_quando_variacao_e_pequena():
     request = TendenciaItemRequest(
-        itens=[SerieItemConsumo(item="Feijao carioca", taxas_execucao=[80.0, 81.0, 79.0, 82.0])]
+        itens=[SerieItemConsumo(item="Feijão carioca", taxas_execucao=[80.0, 81.0, 79.0, 82.0])]
     )
 
     response = calcular_tendencias(request)
